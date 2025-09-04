@@ -1,0 +1,11 @@
+streamlit
+pandas
+requests
+openpyxl
+xlrd
+xlsxwriter
+pdfplumber
+numpy
+scikit-learn
+unidecode
+PyPDF2
