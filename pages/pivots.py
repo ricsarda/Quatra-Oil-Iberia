@@ -1,117 +1,150 @@
+import streamlit as st
 import pandas as pd
-from datetime import datetime
-from io import BytesIO
+from st_aggrid import AgGrid, GridOptionsBuilder
 
-def main(files, pdfs, new_excel, month=None, year=None):
-    try:
-        # === Entrada ===
-        retool = pd.read_csv(files["RetoolCSV"])
-        leadtime = pd.read_excel(files["LeadtimeExcel"], sheet_name='Stock', skiprows=1)
+st.header("📊 Pivots (sin licencia Enterprise)")
 
-        day = int(datetime.now().strftime("%d"))
+up = st.file_uploader("Sube un .xlsx", type=["xlsx"])
+if not up:
+    st.info("Selecciona un archivo para continuar.")
+    st.stop()
 
-        columnas_retool = ['matrícula', 'frame_number', 'brand', 'model', 'Km', 'Año', 'Precio base', 'Oferta', 'model_id']
-        retool = retool[columnas_retool].copy()
+df = pd.read_excel(up, engine="openpyxl")
 
-        retool = retool.merge(
-            leadtime[['Item', 'LEADTIMEPOSTRENTING', 'P.Compra']],
-            left_on='matrícula', right_on='Item', how='left'
+tab_preset, tab_flexible = st.tabs(["🎯 Vista preset", "🛠️ Vista flexible"])
+
+# -------------------- VISTA PRESET --------------------
+with tab_preset:
+    # Nombres según tus capturas (ajústalos si difieren)
+    COL_YEAR   = "Jaar"
+    COL_MONTH  = "Maand"
+    ROW_L1     = "By nature Niv0"
+    ROW_L2     = "By nature Niv2"
+    MEASURE    = "Interco Eliminations Spain"
+
+    MONTH_ORDER = ["jan","feb","mrt","apr","mei","jun","jul","aug","sep","okt","nov","dec"]
+    NIV0_ORDER = [
+        "Sales","Inventory Change Sales","Cost Of Sales","Cost Of Services",
+        "Other Operating Costs","Other Operating Income","Personnel Expenses",
+        "Depreciations","Volume"
+    ]
+
+    missing = [c for c in [COL_YEAR, COL_MONTH, ROW_L1, ROW_L2, MEASURE] if c not in df.columns]
+    if missing:
+        st.error(f"Faltan columnas en el Excel: {missing}")
+        st.stop()
+
+    # Filtros adicionales opcionales (como en tu Excel)
+    with st.expander("Filtros"):
+        resp_col = st.selectbox("Responsible (opcional)", ["(Todos)"] + sorted(df["Responsible"].dropna().unique().tolist())) \
+            if "Responsible" in df.columns else "(Todos)"
+        bl_col   = st.selectbox("Business Line (opcional)", ["(Todos)"] + sorted(df["Business Line"].dropna().unique().tolist())) \
+            if "Business Line" in df.columns else "(Todos)"
+        comp_col = st.selectbox("Company (opcional)", ["(Todos)"] + sorted(df["Company"].dropna().unique().tolist())) \
+            if "Company" in df.columns else "(Todos)"
+
+    years = sorted(df[COL_YEAR].dropna().unique())
+    year_sel = st.selectbox("Año (Jaar)", years, index=len(years)-1)
+
+    dff = df[df[COL_YEAR] == year_sel].copy()
+    if resp_col != "(Todos)" and "Responsible" in dff.columns:
+        dff = dff[dff["Responsible"] == resp_col]
+    if bl_col != "(Todos)" and "Business Line" in dff.columns:
+        dff = dff[dff["Business Line"] == bl_col]
+    if comp_col != "(Todos)" and "Company" in dff.columns:
+        dff = dff[dff["Company"] == comp_col]
+
+    dff[COL_MONTH] = dff[COL_MONTH].astype(str).str.lower()
+    dff[COL_MONTH] = pd.Categorical(dff[COL_MONTH], categories=MONTH_ORDER, ordered=True)
+
+    pivot = pd.pivot_table(
+        dff, index=[ROW_L1, ROW_L2], columns=COL_MONTH, values=MEASURE,
+        aggfunc="sum", fill_value=0, dropna=False
+    )
+
+    # Orden Niv0 personalizado
+    order_map = {name: i for i, name in enumerate(NIV0_ORDER)}
+    lvl0 = pivot.index.get_level_values(0).astype(str).map(lambda x: order_map.get(x, 999))
+    pivot = pivot.iloc[lvl0.argsort(kind="stable")]
+
+    # Reordenar meses, total columna y ocultar filas "todo 0" si se marca
+    pivot = pivot.reindex(columns=MONTH_ORDER, fill_value=0)
+    pivot["Total Año"] = pivot.sum(axis=1)
+
+    hide_zero = st.checkbox("Ocultar líneas con total 0", value=True)
+    if hide_zero:
+        pivot = pivot[pivot.abs().sum(axis=1) != 0]
+
+    # Fila Grand Total
+    total_row = pd.DataFrame([pivot.sum()], index=pd.MultiIndex.from_tuples([("Grand Total","")], names=[ROW_L1, ROW_L2]))
+    out = pd.concat([pivot, total_row]).reset_index()
+
+    # Mostrar en AG Grid
+    gb = GridOptionsBuilder.from_dataframe(out)
+    for c in [*MONTH_ORDER, "Total Año"]:
+        if c in out.columns:
+            gb.configure_column(c, type=["numericColumn"],
+                                valueFormatter="value == null ? '' : Intl.NumberFormat().format(value)",
+                                cellStyle={"textAlign": "right"}, aggFunc="sum")
+    gb.configure_column(ROW_L1, cellClassRules={"row-total": "value === 'Grand Total'"})
+    go = gb.build()
+
+    st.markdown("""
+    <style>
+    .ag-theme-streamlit .row-total { font-weight:700; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    AgGrid(out, gridOptions=go, height=620, allow_unsafe_jscode=True)
+
+# -------------------- VISTA FLEXIBLE --------------------
+with tab_flexible:
+    st.caption("Elige filas/columnas/valor/función. Recalculamos la pivot con pandas (sin drag & drop).")
+
+    # Selección de campos
+    all_cols = df.columns.tolist()
+    num_cols = df.select_dtypes(include="number").columns.tolist()
+
+    cols_rows = st.multiselect("Filas", [c for c in all_cols if c not in num_cols], default=["By nature Niv0","By nature Niv2"] if "By nature Niv0" in all_cols and "By nature Niv2" in all_cols else [])
+    col_cols  = st.selectbox("Columnas", [None] + [c for c in all_cols if c not in num_cols], index=( [None] + [c for c in all_cols if c not in num_cols] ).index("Maand") if "Maand" in all_cols else 0)
+    val_col   = st.selectbox("Valor (numérico)", num_cols, index=(num_cols.index("Interco Eliminations Spain") if "Interco Eliminations Spain" in num_cols else 0))
+    agg       = st.selectbox("Agregación", ["sum","mean","median","max","min","count"], index=0)
+
+    # Filtros rápidos (opcionales)
+    with st.expander("Filtros opcionales"):
+        filt_year = st.selectbox("Filtrar Jaar", ["(Todos)"] + sorted(df["Jaar"].dropna().unique().tolist())) if "Jaar" in df.columns else "(Todos)"
+        filt_company = st.selectbox("Filtrar Company", ["(Todos)"] + sorted(df["Company"].dropna().unique().tolist())) if "Company" in df.columns else "(Todos)"
+    dff2 = df.copy()
+    if "Jaar" in dff2.columns and filt_year != "(Todos)":
+        dff2 = dff2[dff2["Jaar"] == filt_year]
+    if "Company" in dff2.columns and filt_company != "(Todos)":
+        dff2 = dff2[dff2["Company"] == filt_company]
+
+    # Orden meses si el usuario usa Maand como columnas
+    if col_cols == "Maand" and "Maand" in dff2.columns:
+        month_order = ["jan","feb","mrt","apr","mei","jun","jul","aug","sep","okt","nov","dec"]
+        dff2["Maand"] = dff2["Maand"].astype(str).str.lower()
+        dff2["Maand"] = pd.Categorical(dff2["Maand"], categories=month_order, ordered=True)
+
+    if not cols_rows and not col_cols:
+        st.warning("Selecciona al menos una fila o una columna.")
+    else:
+        pt = pd.pivot_table(
+            dff2, index=cols_rows if cols_rows else None, columns=col_cols if col_cols else None,
+            values=val_col, aggfunc=agg, fill_value=0, dropna=False
         )
 
-        retool['LEADTIMEPOSTRENTING'] = pd.to_numeric(retool['LEADTIMEPOSTRENTING'], errors='coerce').fillna(0)
-        retool['LEADTIMEPOSTRENTING'] = retool['LEADTIMEPOSTRENTING'] + day
+        # Quitar filas todo 0 si se marca
+        hide_zero2 = st.checkbox("Ocultar filas con todo 0", value=False, key="hide0flex")
+        if hide_zero2:
+            pt = pt[(pt.abs().sum(axis=1) if isinstance(pt, pd.DataFrame) else (pt != 0)) != 0]
 
-        retool['Oferta'] = pd.to_numeric(retool['Oferta'], errors='coerce').fillna(0)
-        retool['Precio base'] = pd.to_numeric(retool['Precio base'], errors='coerce')
-        retool['Precio web'] = retool.apply(
-            lambda r: r['Oferta'] if r['Oferta'] > 0 else r['Precio base'],
-            axis=1
-        )
+        out2 = pt.reset_index() if isinstance(pt, pd.DataFrame) else pt.to_frame().reset_index()
 
-        retool['P.Compra'] = pd.to_numeric(retool['P.Compra'], errors='coerce')
-        retool['Margen'] = retool['Precio web'] - retool['P.Compra']
-        retool['% Margen'] = (retool['Margen'] / retool['Precio web'] * 100).replace([pd.NA, pd.NaT], 0)
-
-        retool['model'] = retool['model'].astype(str).str.replace(' A2', '', regex=False).str.replace(' ABS', '', regex=False)
-
-        retool = retool.sort_values(by=['brand', 'model'], ignore_index=True)
-        retool['Año'] = pd.to_numeric(retool['Año'], errors='coerce')
-        retool['Km'] = pd.to_numeric(retool['Km'], errors='coerce').fillna(0).astype(int)
-        retool['Año'] = retool['Año'].fillna(retool['Año'].median()).astype(int)
-
-        retool['Coeficiente'] = (2024 - retool['Año'] + retool['Km'] / 5000) * 100
-
-        min_precios = retool.groupby('model', as_index=False)['Precio web'].min().rename(columns={'Precio web': 'Precio mínimo'})
-        retool = retool.merge(min_precios, on='model', how='left')
-        retool['Variación precio'] = retool['Precio web'] - retool['Precio mínimo']
-
-        max_coef = retool.groupby('model', as_index=False)['Coeficiente'].max().rename(columns={'Coeficiente': 'Coeficiente máximo'})
-        retool = retool.merge(max_coef, on='model', how='left')
-        retool['Variación coeficiente'] = retool['Coeficiente máximo'] - retool['Coeficiente']
-
-        retool['Resultado Variación'] = 0.0
-        for idx in range(1, len(retool)):
-            if retool.at[idx, 'model'] == retool.at[idx - 1, 'model']:
-                va = retool.at[idx - 1, 'Variación coeficiente']
-                vb = retool.at[idx, 'Variación coeficiente']
-                if pd.notna(va) and pd.notna(vb):
-                    retool.at[idx, 'Resultado Variación'] = (va - vb) / 10
-            else:
-                retool.at[idx, 'Resultado Variación'] = 0.0
-
-        def actualizar_resultado_variacion(df):
-            for (_, _ano), grupo in df.groupby(['model', 'Año']):
-                if len(grupo) > 1:
-                    g_idxmax = grupo['Km'].idxmax()
-                    g_idxmin = grupo['Km'].idxmin()
-                    moto_max = df.loc[g_idxmax]
-                    moto_min = df.loc[g_idxmin]
-                    if pd.notna(moto_max['Precio web']) and pd.notna(moto_min['Precio web']):
-                        if moto_max['Precio web'] >= (moto_min['Precio web'] + 2500):
-                            delta = (moto_max['Precio web'] - moto_min['Precio web'] + 2500) * 0.05 + 200
-                            df.loc[g_idxmax, 'Resultado Variación'] += delta
-            return df
-
-        retool = actualizar_resultado_variacion(retool)
-
-        def actualizar_resultado_variacion2(df):
-            for _model, grupo in df.groupby('model'):
-                if len(grupo) > 1:
-                    grupo = grupo.sort_values(by='Km')
-                    for i in range(len(grupo) - 1):
-                        i1 = grupo.index[i]
-                        i2 = grupo.index[i + 1]
-                        m1 = df.loc[i1]
-                        m2 = df.loc[i2]
-                        if abs(m1['Km'] - m2['Km']) < 2500:
-                            if (m1['Año'] < m2['Año']) and (m1['Precio web'] >= m2['Precio web']):
-                                df.loc[i1, 'Resultado Variación'] += 200
-                            elif (m2['Año'] < m1['Año']) and (m2['Precio web'] >= m1['Precio web']):
-                                df.loc[i2, 'Resultado Variación'] += 200
-            return df
-
-        retool = actualizar_resultado_variacion2(retool)
-
-        retool = retool.sort_values(by='Resultado Variación', ascending=False, ignore_index=True)
-
-        # Redondear a 2 decimales
-        retool['% Margen'] = retool['% Margen'].round(2)
-        retool['Resultado Variación'] = retool['Resultado Variación'].round(2)
-
-        columnas_final = [
-            'matrícula', 'frame_number', 'brand', 'model', 'Km', 'Año',
-            'P.Compra', 'Precio base', 'Oferta', 'Precio web', 'Margen',
-            '% Margen', 'Resultado Variación', 'LEADTIMEPOSTRENTING'
-        ]
-        retool = retool[columnas_final]
-
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            retool.to_excel(writer, sheet_name='Revision pricing web', index=False)
-        output.seek(0)
-        return output
-
-    except KeyError as e:
-        raise RuntimeError(f"Falta el archivo clave en 'files': {str(e)}")
-    except Exception as e:
-        raise RuntimeError(f"Error al procesar la revisión de pricing: {str(e)}")
+        gb2 = GridOptionsBuilder.from_dataframe(out2)
+        for c in out2.select_dtypes(include="number").columns:
+            gb2.configure_column(c, type=["numericColumn"],
+                                 valueFormatter="value == null ? '' : Intl.NumberFormat().format(value)",
+                                 cellStyle={"textAlign": "right"})
+        go2 = gb2.build()
+        AgGrid(out2, gridOptions=go2, height=620, allow_unsafe_jscode=True)
