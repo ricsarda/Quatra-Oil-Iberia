@@ -66,7 +66,7 @@ st.dataframe(det, use_container_width=True)
 # Mapa visual
 st.subheader("Anomalies")
 styled = pivot.style.apply(lambda row: [
-    "background-color:#ffffff" if not np.isnan(pct[row.name==pivot.index,i]) and np.abs(pct[row.name==pivot.index,i])>0.5 else "" 
+    "background-color:#E32705" if not np.isnan(pct[row.name==pivot.index,i]) and np.abs(pct[row.name==pivot.index,i])>0.5 else "" 
     for i in range(len(row))
 ], axis=1).format("{:,.0f}".format)
 st.dataframe(styled, use_container_width=True)
