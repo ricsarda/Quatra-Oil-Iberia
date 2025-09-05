@@ -64,9 +64,9 @@ st.subheader("Detalle de saltos (>50%)")
 st.dataframe(det, use_container_width=True)
 
 # Mapa visual
-st.subheader("Mapa visual de anomalías")
+st.subheader("Anomalies")
 styled = pivot.style.apply(lambda row: [
-    "background-color:#ffdddd" if not np.isnan(pct[row.name==pivot.index,i]) and np.abs(pct[row.name==pivot.index,i])>0.5 else "" 
+    "background-color:#ffffff" if not np.isnan(pct[row.name==pivot.index,i]) and np.abs(pct[row.name==pivot.index,i])>0.5 else "" 
     for i in range(len(row))
 ], axis=1).format("{:,.0f}".format)
 st.dataframe(styled, use_container_width=True)
