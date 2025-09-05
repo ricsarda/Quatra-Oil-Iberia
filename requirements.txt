@@ -9,3 +9,4 @@ numpy
 scikit-learn
 unidecode
 PyPDF2
+streamlit-aggrid
