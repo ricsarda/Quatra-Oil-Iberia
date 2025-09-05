@@ -1,66 +1,140 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 from st_aggrid import AgGrid, GridOptionsBuilder
 
-st.header("📊 Pivots interactivos (sube tu Excel)")
+st.header("📊 Pivots – Vista preconfigurada (Jaar/Maand)")
 
-up = st.file_uploader("Sube un .xlsx", type=["xlsx"])
+up = st.file_uploader("Sube tu .xlsx", type=["xlsx"])
 if not up:
     st.info("Selecciona un archivo para continuar.")
     st.stop()
 
-# Lee el fichero subido (file-like) con openpyxl:
-df = pd.read_excel(up, engine="openpyxl")  # <- aquí estaba tu error
+# Lee Excel
+df = pd.read_excel(up, engine="openpyxl")
 
-# Ratios opcionales (ajusta nombres de columnas a tu caso)
-df = df.copy()
-if {"Ventas", "Coste"} <= set(df.columns):
-    ventas = df["Ventas"].replace(0, pd.NA)
-    df["Margen_%"] = (df["Ventas"] - df["Coste"]) / ventas * 100
-if {"Producto", "Ventas"} <= set(df.columns):
-    df = df.sort_values(["Producto"])
-    df["Variación_%"] = df.groupby("Producto")["Ventas"].pct_change() * 100
+# === CONFIGURACIÓN DEL PRESET (ajusta si tus nombres difieren) ===
+COL_YEAR   = "Jaar"
+COL_MONTH  = "Maand"
+ROW_L1     = "By nature Niv0"
+ROW_L2     = "By nature Niv2"
+MEASURE    = "Interco Eliminations Spain"
 
-c1, c2, c3 = st.columns(3)
-if "Ventas" in df.columns:
-    c1.metric("Ventas totales", f"{df['Ventas'].sum():,.0f}")
-if "Margen_%" in df.columns:
-    c2.metric("Margen medio", f"{pd.to_numeric(df['Margen_%'], errors='coerce').mean():.2f}%")
-c3.metric("Filas", f"{len(df):,}")
+# Orden de meses (según tu captura: jan, feb, mrt, apr, mei, jun, jul, aug, sep, okt, nov, dec)
+MONTH_ORDER = ["jan","feb","mrt","apr","mei","jun","jul","aug","sep","okt","nov","dec"]
+
+# Orden de Niv0 (según tus filas visibles)
+NIV0_ORDER = [
+    "Sales",
+    "Inventory Change Sales",
+    "Cost Of Sales",
+    "Cost Of Services",
+    "Other Operating Costs",
+    "Other Operating Income",
+    "Personnel Expenses",
+    "Depreciations",
+]
+
+# ---- Filtros UI ----
+if COL_YEAR not in df.columns:
+    st.error(f"No encuentro la columna '{COL_YEAR}' en el Excel.")
+    st.stop()
+
+years = sorted(x for x in df[COL_YEAR].dropna().unique())
+year_sel = st.selectbox("Año (Jaar)", years, index=len(years)-1)
+
+# Filtra por año seleccionado
+dff = df[df[COL_YEAR] == year_sel].copy()
+
+# Normaliza mes a categoría ordenada
+if COL_MONTH not in dff.columns:
+    st.error(f"No encuentro la columna '{COL_MONTH}' en el Excel.")
+    st.stop()
+
+dff[COL_MONTH] = dff[COL_MONTH].astype(str).str.lower()
+dff[COL_MONTH] = pd.Categorical(dff[COL_MONTH], categories=MONTH_ORDER, ordered=True)
+
+# Validaciones de columnas de filas y valor
+for col in [ROW_L1, ROW_L2, MEASURE]:
+    if col not in dff.columns:
+        st.error(f"No encuentro la columna '{col}' en el Excel.")
+        st.stop()
+
+# Pivot: filas jerárquicas (Niv0, Niv2) x columnas Mes; Valores = suma del measure
+pivot = pd.pivot_table(
+    dff,
+    index=[ROW_L1, ROW_L2],
+    columns=COL_MONTH,
+    values=MEASURE,
+    aggfunc="sum",
+    fill_value=0,
+    dropna=False,
+)
+
+# Orden de filas: primero por Niv0 (orden personalizado) y dentro por Niv2 alfabético
+pivot = pivot.sort_index(level=[0,1])  # base
+# Aplica orden de Niv0 con Categorical
+lvl0 = pivot.index.get_level_values(0).astype(str)
+order_map = {name: i for i, name in enumerate(NIV0_ORDER)}
+order_series = lvl0.map(lambda x: order_map.get(x, len(NIV0_ORDER)+1))
+pivot = pivot.iloc[order_series.argsort(kind="stable")]
+
+# Asegura el orden de columnas de meses y añade "Grand Total" columna
+pivot = pivot.reindex(columns=MONTH_ORDER, fill_value=0)
+pivot["Grand Total"] = pivot.sum(axis=1)
+
+# Añade fila Grand Total (total general)
+total_row = pd.DataFrame([pivot.sum()], index=pd.MultiIndex.from_tuples([("Grand Total","")], names=[ROW_L1, ROW_L2]))
+pivot_full = pd.concat([pivot, total_row])
+
+# Formatea para mostrar (opcional: más limpio)
+display_df = pivot_full.reset_index()
+
+# === Muestra KPIs rápidos ===
+c1, c2 = st.columns(2)
+c1.metric("Total general del año", f"{pivot_full.loc[('Grand Total',''),'Grand Total']:,.2f}")
+c2.metric("Filas (Niv0/Niv2)", f"{pivot.shape[0]:,}")
 
 st.divider()
 
-gb = GridOptionsBuilder.from_dataframe(df)
-gb.configure_default_column(enableValue=True, enableRowGroup=True, enablePivot=True)  # pivot real = Enterprise
-gb.configure_side_bar()
+# === AG Grid ===
+gb = GridOptionsBuilder.from_dataframe(display_df)
 
-if "Margen_%" in df.columns:
-    gb.configure_column(
-        "Margen_%", type=["numericColumn"],
-        valueFormatter="value == null ? '' : (Number(value).toFixed(2) + '%')",
-        cellStyle={'textAlign': 'right'},
-        cellClassRules={
-            'bg-good': 'Number(x) >= 30',
-            'bg-warn': 'Number(x) < 30 && Number(x) >= 15',
-            'bg-bad':  'Number(x) < 15'
-        },
-    )
+# Alineación a la derecha y separadores de miles para números
+for col in MONTH_ORDER + ["Grand Total"]:
+    if col in display_df.columns:
+        gb.configure_column(
+            col,
+            type=["numericColumn"],
+            valueFormatter="value == null ? '' : Intl.NumberFormat().format(value)",
+            cellStyle={'textAlign':'right'},
+            aggFunc="sum"
+        )
 
-for col in df.select_dtypes(include="number").columns:
-    gb.configure_column(col, aggFunc="sum")
+# Estilos condicionales de ejemplo: resaltar totales
+gb.configure_column("Grand Total",
+    cellClassRules={
+        'bg-total': 'true'  # toda la columna
+    },
+    valueFormatter="value == null ? '' : Intl.NumberFormat().format(value)",
+    cellStyle={'textAlign':'right'}
+)
+
+# Colorea la fila 'Grand Total'
+gb.configure_column(ROW_L1, cellClassRules={'row-total': f"value === 'Grand Total'"})
+
+grid_options = gb.build()
 
 st.markdown("""
 <style>
-.ag-theme-streamlit .bg-good { background: #d2f8d2 !important; }
-.ag-theme-streamlit .bg-warn { background: #fff5cc !important; }
-.ag-theme-streamlit .bg-bad  { background: #ffd6d6 !important; }
+.ag-theme-streamlit .bg-total { background:#E8F4FF !important; font-weight:600; }
+.ag-theme-streamlit .row-total { font-weight:700; }
 </style>
 """, unsafe_allow_html=True)
 
 AgGrid(
-    df,
-    gridOptions=gb.build(),
+    display_df,
+    gridOptions=grid_options,
     height=620,
-    enable_enterprise_modules=True,   # si tienes licencia, tendrás Pivot
     allow_unsafe_jscode=True
 )
